@@ -48,7 +48,7 @@ class Faiss:
                  tenant: str,
                  index_name: str,
                  partition: str,
-                 texts: str,
+                 texts: List[str],
                  info: list,
                  filter_exist: bool = True,
                  log_id=None):
@@ -70,9 +70,9 @@ class Faiss:
             if not filter_exist:
                 mid_list = list(map(lambda x: x.id, docs))
                 ids = da[mid_list, 'tags__idx']
-                return np.array(ids, dtype=np.int32), list(range(len(docs)))
+                return np.array(ids, dtype=np.int32), list(range(len(docs))), mid_list
 
-            return None, []
+            return None, [], []
 
         # 添加位置标记
         length = len(da)
@@ -82,13 +82,15 @@ class Faiss:
         # 用于 encode for vector
         filter_texts = list(map(lambda x: x.text, filter_docs))
 
+        doc_ids = list(map(lambda x: x.id, filter_docs))
+
         # 插入数据
         with da:
             da.extend(filter_docs)
 
         # 返回 ids
         length = len(da)
-        return np.arange(length, length - len(filter_texts), -1), filter_indices
+        return np.arange(length, length - len(filter_texts), -1), filter_indices, doc_ids
 
     @logs.log
     def add(self,
@@ -147,7 +149,7 @@ class Faiss:
         ids = da[:, 'id']
         texts = da[:, 'text']
         tags = da[:, 'tags']
-        return list({_id: {'text': texts[_i], **tags} for _i, _id in enumerate(ids)}.items())
+        return list({_id: {'text': texts[_i], **tags[_i]} for _i, _id in enumerate(ids)}.items())
 
     def save_one(self, tenant: str, index_name: str, partition: str = '', log_id=None) -> int:
         _index = self.index(tenant, index_name, partition)
@@ -301,9 +303,21 @@ class Faiss:
         if len(da) == 0:
             return
 
-        ids = list(filter(lambda x: x in da, ids))
-        if ids:
-            del da[ids]
+        if not ids:
+            return
+
+        if isinstance(ids[0], int):
+            ids.sort(reverse=True)
+            len_da = len(da)
+            ids = list(filter(lambda x: x < len_da, ids))
+
+            for _id in ids:
+                del da[_id]
+
+        else:
+            ids = list(filter(lambda x: x in da, ids))
+            if ids:
+                del da[ids]
 
     @logs.log
     def _search_a_index(self,
@@ -362,7 +376,8 @@ class Faiss:
         if not ids:
             return
 
-        tenant, index_name, partition = table_name.split('__')
+        clean_table_name = table_name[:-9] if table_name.endswith('__default') else table_name
+        tenant, index_name, partition = clean_table_name.split('__')
         da = self.get_da(tenant, index_name, partition)
 
         texts = da[ids, 'text']
@@ -490,7 +505,7 @@ def _combine_results(results: List[list], avg_results: List[dict], d_table_id_2_
             if val['table_name'] not in tmp_avg_result:
                 avg_similarity = 1.
             else:
-                _partition = data['partition'] if 'partition' in data else ''
+                _partition = data['field'] if 'field' in data else ''
                 tmp_avg_ret = tmp_avg_result[val['table_name']]
                 avg_similarity = tmp_avg_ret[_partition] if _partition in tmp_avg_ret else 0.
 

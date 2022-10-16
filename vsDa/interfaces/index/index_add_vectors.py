@@ -66,19 +66,19 @@ def index_add_vectors(_input: VectorInput, log_id: Union[int, str] = None):
     vectors = np.array(vectors).astype(np.float32)
 
     if not ids:
-        in_ids, filter_indices = o_faiss.add_data(tenant, index_name, partition, texts, info, filter_exist)
+        in_ids, filter_indices, doc_ids = o_faiss.add_data(tenant, index_name, partition, texts, info, filter_exist)
         if in_ids is None:
             return {'code': 1, 'msg': '数据已存在'}
 
-        ids = list(map(int, in_ids))
         if len(filter_indices) < len(vectors):
             vectors = vectors[filter_indices]
     else:
+        doc_ids = ids
         in_ids: np.ndarray = np.array(ids, dtype=np.int32)
 
     o_faiss.add(tenant, index_name, partition, in_ids, vectors, mv_partition=mv_partition, log_id=log_id)
 
-    return {'code': 1, 'data': ids}
+    return {'code': 1, 'data': doc_ids}
 
 
 if __name__ == '__main__':
