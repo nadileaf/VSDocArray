@@ -53,7 +53,7 @@ class Faiss:
                  filter_exist: bool = True,
                  log_id=None):
         docs = [Document(
-            id=md5(text + partition if partition else text),
+            id=md5((text, f'{info}', partition)),
             text=text,
             tags=info[i],
         ) for i, text in enumerate(texts)]
