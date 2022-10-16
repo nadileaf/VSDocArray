@@ -61,7 +61,12 @@ class Faiss:
         da: DocumentArray = self.get_da(tenant, index_name, partition)
 
         # 过滤重复数据
-        filter_indices = [i for i, d in enumerate(docs) if d.id not in da]
+        d_id = {}
+        for i, d in enumerate(docs):
+            if d.id not in da and d.id not in d_id:
+                d_id[d.id] = i
+        filter_indices = list(d_id.values())
+
         filter_docs = list(map(lambda i: docs[i], filter_indices))
 
         # 若都是重复数据
