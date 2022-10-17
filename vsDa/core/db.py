@@ -287,6 +287,15 @@ class Faiss:
         index = self.index(tenant, index_name, partition)
         return index.is_trained if index is not None else False
 
+    def create(self, tenant: str, index_name: str, partition: str, count: int, dim_size: int, n_list: int = None):
+        partition = partition if partition else self.DEFAULT
+        if tenant not in self.indices:
+            self.indices[tenant] = {}
+        if index_name not in self.indices[tenant]:
+            self.indices[tenant][index_name] = {}
+        if partition not in self.indices[tenant][index_name]:
+            self.indices[tenant][index_name][partition] = get_index(count, dim_size, n_list)
+
     @logs.log
     def search(self,
                vectors: np.ndarray,
