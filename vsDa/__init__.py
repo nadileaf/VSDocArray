@@ -7,7 +7,7 @@ import numpy as np
 _cur_dir = os.path.split(os.path.abspath(__file__))[0]
 sys.path.append(_cur_dir)
 
-from vsDa.core.db import o_faiss, Faiss
+from vsDa.core.db import o_faiss, Faiss, get_index
 from vsDa.interfaces.index.index_add_vectors import index_add_vectors, VectorInput
 from vsDa.interfaces.index.index_create import index_create
 from vsDa.interfaces.index.index_delete_with_ids import index_delete_with_ids, IdsInput

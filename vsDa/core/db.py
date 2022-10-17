@@ -4,19 +4,20 @@ import faiss
 import threading
 import numpy as np
 from docarray import Document, DocumentArray
-from typing import List, Union, Any
+from typing import List, Union
 from six.moves import cPickle as pickle
 from sklearn.metrics.pairwise import cosine_similarity
 from vsDa.config.path import INDEX_DIR, SQLITE_DIR
-from vsDa.lib.utils import md5, uid, get_relative_file
+from vsDa.lib.utils import md5, get_relative_file
 from vsDa.lib import logs
 
 
 class Faiss:
     DEFAULT = '__default'
 
-    def __init__(self, data_dir: str = None):
-        self.__data_dir = data_dir if data_dir else SQLITE_DIR
+    def __init__(self, data_dir: str = None, index_dir: str = None):
+        self.__data_dir = data_dir if data_dir and os.path.isdir(data_dir) else SQLITE_DIR
+        self.__idx_dir = index_dir if index_dir and os.path.isdir(index_dir) else INDEX_DIR
 
         # 记录索引
         self.indices = {}
@@ -166,21 +167,21 @@ class Faiss:
                 if _index is None:
                     continue
 
-                index_path = get_relative_file(tenant, index_name, f'{partition}.index', root=INDEX_DIR)
+                index_path = get_relative_file(tenant, index_name, f'{partition}.index', root=self.__idx_dir)
                 faiss.write_index(_index, index_path)
 
             if tenant in self.mv_indices and index_name in self.mv_indices[tenant] and \
                     self.mv_indices[tenant][index_name] is not None:
-                with open(get_relative_file(tenant, index_name, 'mv_index.pkl', root=INDEX_DIR), 'wb') as f:
+                with open(get_relative_file(tenant, index_name, 'mv_index.pkl', root=self.__idx_dir), 'wb') as f:
                     pickle.dump(self.mv_indices[tenant][index_name], f)
 
         else:
-            index_path = get_relative_file(tenant, index_name, f'{partition}.index', root=INDEX_DIR)
+            index_path = get_relative_file(tenant, index_name, f'{partition}.index', root=self.__idx_dir)
             faiss.write_index(_index, index_path)
 
             if partition == self.DEFAULT and tenant in self.mv_indices and index_name in self.mv_indices[tenant] and \
                     self.mv_indices[tenant][index_name] is not None:
-                with open(get_relative_file(tenant, index_name, 'mv_index.pkl', root=INDEX_DIR), 'wb') as f:
+                with open(get_relative_file(tenant, index_name, 'mv_index.pkl', root=self.__idx_dir), 'wb') as f:
                     pickle.dump(self.mv_indices[tenant][index_name], f)
 
         return 1
@@ -196,7 +197,7 @@ class Faiss:
 
     def load_one(self, tenant: str, index_name: str, partition: str = '', log_id=None) -> int:
         if not partition:
-            index_dir = os.path.join(INDEX_DIR, tenant, index_name)
+            index_dir = os.path.join(self.__idx_dir, tenant, index_name)
             if (not os.path.isdir(index_dir) or not os.listdir(index_dir)) and \
                     (tenant not in self.indices or index_name not in self.indices[tenant]):
                 return 0
@@ -228,7 +229,7 @@ class Faiss:
                     self.mv_indices[tenant][index_name] = pickle.load(f)
 
         else:
-            index_path = os.path.join(INDEX_DIR, tenant, index_name, f'{partition}.index')
+            index_path = os.path.join(self.__idx_dir, tenant, index_name, f'{partition}.index')
             if not os.path.exists(index_path) and (
                     tenant not in self.indices or index_name not in self.indices[tenant] or
                     partition not in self.indices[tenant][index_name]):
@@ -248,7 +249,7 @@ class Faiss:
 
     def load(self, tenant: str, log_id=None):
         """ 从文件中加载索引 """
-        _tenant_dir = os.path.join(INDEX_DIR, tenant)
+        _tenant_dir = os.path.join(self.__idx_dir, tenant)
         if not os.path.isdir(_tenant_dir):
             return
 
@@ -272,6 +273,19 @@ class Faiss:
                 del self.indices[tenant][index_name][partition]
 
         return 1
+
+    def exist(self, tenant: str, index_name: str, partition: str):
+        if self.index(tenant, index_name, partition) is not None:
+            return True
+
+        partition = partition if partition else self.DEFAULT
+        if os.path.exists(os.path.join(self.__idx_dir, tenant, index_name, f'{partition}.index')):
+            return True
+        return False
+
+    def is_train(self, tenant: str, index_name: str, partition: str):
+        index = self.index(tenant, index_name, partition)
+        return index.is_trained if index is not None else False
 
     @logs.log
     def search(self,
@@ -408,11 +422,6 @@ class Faiss:
             thread.join()
 
         return d_table_id_2_info
-
-
-# def _db(table_name: str = None):
-#     """ 使用 sqlite 作为缓存 """
-#     return SqliteDict(os.path.join(SQLITE_DIR, f'{table_name}.sqlite'), tablename=table_name, autocommit=True)
 
 
 def process_score(score) -> float:
