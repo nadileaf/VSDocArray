@@ -2,7 +2,6 @@ import os
 import math
 import faiss
 import threading
-from queue import Queue
 import numpy as np
 import pandas as pd
 from typing import List, Union
@@ -26,6 +25,9 @@ class Faiss:
         # 记录 index 每个分区的滑动平均向量
         self.mv_indices = {}
 
+        print(f'DATA_ROOT: {self.data_dir}')
+        print(f'INDEX_ROOT: {self.idx_dir}')
+
     def get_df_path(self, tenant: str, index_name: str, partition: str = ''):
         partition = partition if partition != self.DEFAULT else ''
         table_name = get_table_name(tenant, index_name, partition)
@@ -34,6 +36,14 @@ class Faiss:
 
     def get_df(self, tenant: str, index_name: str, partition: str = '', skip_rows=None, names=None, chunk_size=None):
         file_path = self.get_df_path(tenant, index_name, partition)
+        if not os.path.exists(file_path):
+            return pd.DataFrame()
+
+        if skip_rows and not names:
+            tmp_gen = pd.read_csv(file_path, chunksize=1)
+            tmp_df = next(tmp_gen)
+            names = list(tmp_df.columns)
+
         if chunk_size is None:
             return pd.read_csv(file_path, skiprows=skip_rows, names=names)
         else:
@@ -67,12 +77,15 @@ class Faiss:
 
         if info:
             for i, val in enumerate(info):
+                if 'text' not in val:
+                    val['text'] = texts[i]
+                val['alias'] = texts[i]
+
                 if 'mid' in val:
                     del val['mid']
-                val['text'] = texts[i]
                 val['mid'] = md5(val)
         else:
-            info = list(map(lambda x: {'text': x, 'mid': md5({'text': x})}, texts))
+            info = list(map(lambda x: {'text': x, 'alias': x, 'mid': md5({'text': x, 'alias': x})}, texts))
 
         names = list(info[0].keys())
 
@@ -111,9 +124,9 @@ class Faiss:
                             in_df_indices.append(d_text[mid])
 
                 else:
-                    d_text = dict(zip(df['text'], df.index))
+                    d_text = dict(zip(df['alias'], df.index))
                     for i, val in enumerate(info):
-                        _text = val['text']
+                        _text = val['alias']
                         if _text not in d_text:
                             filter_indices.append(i)
                         else:
@@ -196,7 +209,9 @@ class Faiss:
 
         _info = [{n: df[n][_i] for n in names} for _i in range(len_df)]
         if 'mid' in df:
-            _info = list({v['mid']: v for v in _info}.values())
+            _info = list({v['mid']: v for v in _info}.items())
+        else:
+            _info = list({v['text']: v for v in _info}.items())
 
         return _info
 
@@ -345,6 +360,7 @@ class Faiss:
                tenants: List[str],
                index_names: List[str],
                partitions: List[str] = None,
+               columns: List[str] = None,
                nprobe=10,
                top_k=20,
                each_top_k=20,
@@ -365,7 +381,7 @@ class Faiss:
                                  avg_results, use_mv, d_table_name_2_ids, results, log_id=log_id)
 
         # 获取具体的结构化信息
-        d_table_id_2_info = self._get_info(d_table_name_2_ids, log_id=log_id)
+        d_table_id_2_info = self._get_info(d_table_name_2_ids, columns, log_id=log_id)
 
         return _combine_results(results, avg_results, d_table_id_2_info, top_k, log_id=log_id)
 
@@ -454,21 +470,22 @@ class Faiss:
                          partition: str,
                          table_name: str,
                          ids: list,
-                         d_table_id_2_info: dict):
+                         d_table_id_2_info: dict,
+                         columns: List[str] = None):
         if not ids:
             return
 
         min_i = min(ids)
         max_i = max(ids)
 
-        df = self.get_df(tenant, index_name, partition, skip_rows=min_i, chunk_size=max_i - min_i + 1)
+        df = self.get_df(tenant, index_name, partition, skip_rows=min_i, chunk_size=max_i - min_i + 1, names=columns)
         for _id in ids:
             info = df.iloc[_id - min_i].to_dict()
             table_id = f"{table_name}__{_id}"
             d_table_id_2_info[table_id] = info
 
     @logs.log
-    def _get_info(self, d_table_name_2_ids: dict, log_id=None) -> dict:
+    def _get_info(self, d_table_name_2_ids: dict, columns: List[str] = None, log_id=None) -> dict:
         """ 获取具体的结构化信息 """
         d_table_id_2_info = {}
 
@@ -507,7 +524,7 @@ class Faiss:
         pool = []
         for tenant, index_name, partition, table_name, ids in q:
             thread = threading.Thread(target=self._get_info_thread, args=(
-                tenant, index_name, partition, table_name, ids, d_table_id_2_info))
+                tenant, index_name, partition, table_name, ids, d_table_id_2_info, columns))
             thread.start()
             pool.append(thread)
 

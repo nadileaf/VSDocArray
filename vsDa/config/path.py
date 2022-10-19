@@ -34,5 +34,3 @@ for dir_name in DATA_ROOT.split(r'/'):
 for _dir_path in [INDEX_DIR, LOG_DIR, SQLITE_DIR, TMP_DIR]:
     if not os.path.exists(_dir_path):
         os.mkdir(_dir_path)
-
-print(f'DATA_ROOT: {DATA_ROOT}')
