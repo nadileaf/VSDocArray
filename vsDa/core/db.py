@@ -2,8 +2,9 @@ import os
 import math
 import faiss
 import threading
+from queue import Queue
 import numpy as np
-from docarray import Document, DocumentArray
+import pandas as pd
 from typing import List, Union
 from six.moves import cPickle as pickle
 from sklearn.metrics.pairwise import cosine_similarity
@@ -16,8 +17,8 @@ class Faiss:
     DEFAULT = '__default'
 
     def __init__(self, data_dir: str = None, index_dir: str = None):
-        self.__data_dir = data_dir if data_dir and os.path.isdir(data_dir) else SQLITE_DIR
-        self.__idx_dir = index_dir if index_dir and os.path.isdir(index_dir) else INDEX_DIR
+        self.data_dir = data_dir if data_dir and os.path.isdir(data_dir) else SQLITE_DIR
+        self.idx_dir = index_dir if index_dir and os.path.isdir(index_dir) else INDEX_DIR
 
         # 记录索引
         self.indices = {}
@@ -25,11 +26,19 @@ class Faiss:
         # 记录 index 每个分区的滑动平均向量
         self.mv_indices = {}
 
-    def get_da(self, tenant: str, index_name: str, partition: str = ''):
+    def get_df_path(self, tenant: str, index_name: str, partition: str = ''):
+        partition = partition if partition != self.DEFAULT else ''
         table_name = get_table_name(tenant, index_name, partition)
-        file_name = f'{table_name}.sqlite'
-        file_path = os.path.join(self.__data_dir, file_name)
-        return DocumentArray(storage='sqlite', config={'connection': file_path, 'table_name': 'tb'})
+        file_name = f'{table_name}.csv'
+        return os.path.join(self.data_dir, file_name)
+
+    def get_df(self, tenant: str, index_name: str, partition: str = '', skip_rows=None, names=None, chunk_size=None):
+        file_path = self.get_df_path(tenant, index_name, partition)
+        if chunk_size is None:
+            return pd.read_csv(file_path, skiprows=skip_rows, names=names)
+        else:
+            df_gen = pd.read_csv(file_path, skiprows=skip_rows, names=names, chunksize=chunk_size)
+            return next(df_gen)
 
     def index(self, tenant: str, index_name: str, partition: str = '') -> Union[None, faiss.Index]:
         if tenant not in self.indices or index_name not in self.indices[tenant] or \
@@ -53,50 +62,80 @@ class Faiss:
                  info: list,
                  filter_exist: bool = True,
                  log_id=None):
-        docs = [Document(
-            id=md5((text, f'{info}', partition)),
-            text=text,
-            tags=info[i],
-        ) for i, text in enumerate(texts)]
-
-        da: DocumentArray = self.get_da(tenant, index_name, partition)
-
-        # 过滤重复数据
-        d_id = {}
-        for i, d in enumerate(docs):
-            if d.id not in da and d.id not in d_id:
-                d_id[d.id] = i
-        filter_indices = list(d_id.values())
-
-        filter_docs = list(map(lambda i: docs[i], filter_indices))
-
-        # 若都是重复数据
-        if not filter_docs:
-            # 若需要重复插入
-            if not filter_exist:
-                mid_list = list(map(lambda x: x.id, docs))
-                ids = da[mid_list, 'tags__idx']
-                return np.array(ids, dtype=np.int32), list(range(len(docs))), mid_list
-
+        if not texts and not info:
             return None, [], []
 
-        # 添加位置标记
-        length = len(da)
-        for i, doc in enumerate(filter_docs):
-            doc.tags['idx'] = length + i
+        if info:
+            for i, val in enumerate(info):
+                if 'mid' in val:
+                    del val['mid']
+                val['text'] = texts[i]
+                val['mid'] = md5(val)
+        else:
+            info = list(map(lambda x: {'text': x, 'mid': md5({'text': x})}, texts))
 
-        # 用于 encode for vector
-        filter_texts = list(map(lambda x: x.text, filter_docs))
+        names = list(info[0].keys())
 
-        doc_ids = list(map(lambda x: x.id, filter_docs))
+        filter_indices = []
+        in_df_indices = []
 
-        # 插入数据
-        with da:
-            da.extend(filter_docs)
+        d_mid = {}
+        for i, v in enumerate(info):
+            mid = v['mid']
+            if mid not in d_mid:
+                d_mid[mid] = True
+            else:
+                filter_indices.append(i)
 
-        # 返回 ids
-        length = len(da)
-        return np.arange(length, length - len(filter_texts), -1), filter_indices, doc_ids
+        offset = 0
+
+        file_path = self.get_df_path(tenant, index_name, partition)
+        exist_file = os.path.exists(file_path)
+
+        if exist_file:
+            df_gen = pd.read_csv(file_path, names=names, chunksize=500000)
+            for df in df_gen:
+                len_df = len(df)
+                if not len_df:
+                    continue
+
+                offset += len_df
+
+                if 'mid' in df:
+                    d_text = dict(zip(df['mid'], df.index))
+                    for i, val in enumerate(info):
+                        mid = val['mid']
+                        if mid not in d_text:
+                            filter_indices.append(i)
+                        else:
+                            in_df_indices.append(d_text[mid])
+
+                else:
+                    d_text = dict(zip(df['text'], df.index))
+                    for i, val in enumerate(info):
+                        _text = val['text']
+                        if _text not in d_text:
+                            filter_indices.append(i)
+                        else:
+                            in_df_indices.append(d_text[_text])
+
+            if not filter_indices:
+                if not filter_exist:
+                    mid_list = list(map(lambda x: x['mid'], info))
+                    return np.array(in_df_indices, dtype=np.int32), list(range(len(info))), mid_list
+                return None, [], []
+
+        filter_indices = list(set(filter_indices))
+        filter_indices.sort()
+
+        filter_info = [info[i] for i in filter_indices] if filter_indices else info
+        filter_indices = list(range(len(info))) if not filter_indices else filter_indices
+
+        df = pd.DataFrame(filter_info, columns=names)
+        df.to_csv(file_path, index=False, mode='a', header=False if exist_file else True)
+
+        mid_list = list(map(lambda x: x['mid'], filter_info))
+        return np.arange(offset, offset + len(filter_indices)), filter_indices, mid_list
 
     @logs.log
     def add(self,
@@ -147,15 +186,19 @@ class Faiss:
 
                 self.mv_indices[tenant][index_name][tmp_partition] = {'vector': avg_embedding, 'count': count}
 
-    def list_info(self, tenant: str, index_name: str, partition: str = '', log_id=None) -> list:
-        da = self.get_da(tenant, index_name, partition)
-        if len(da) == 0:
+    def list_info(self, tenant: str, index_name: str, partition: str = '', names=None, log_id=None) -> list:
+        df = self.get_df(tenant, index_name, partition, names=names)
+        len_df = len(df)
+        if not len_df:
             return []
 
-        ids = da[:, 'id']
-        texts = da[:, 'text']
-        tags = da[:, 'tags']
-        return list({_id: {'text': texts[_i], **tags[_i]} for _i, _id in enumerate(ids)}.items())
+        names = list(df.columns) if not names else names
+
+        _info = [{n: df[n][_i] for n in names} for _i in range(len_df)]
+        if 'mid' in df:
+            _info = list({v['mid']: v for v in _info}.values())
+
+        return _info
 
     def save_one(self, tenant: str, index_name: str, partition: str = '', log_id=None) -> int:
         _index = self.index(tenant, index_name, partition)
@@ -167,21 +210,21 @@ class Faiss:
                 if _index is None:
                     continue
 
-                index_path = get_relative_file(tenant, index_name, f'{partition}.index', root=self.__idx_dir)
+                index_path = get_relative_file(tenant, index_name, f'{partition}.index', root=self.idx_dir)
                 faiss.write_index(_index, index_path)
 
             if tenant in self.mv_indices and index_name in self.mv_indices[tenant] and \
                     self.mv_indices[tenant][index_name] is not None:
-                with open(get_relative_file(tenant, index_name, 'mv_index.pkl', root=self.__idx_dir), 'wb') as f:
+                with open(get_relative_file(tenant, index_name, 'mv_index.pkl', root=self.idx_dir), 'wb') as f:
                     pickle.dump(self.mv_indices[tenant][index_name], f)
 
         else:
-            index_path = get_relative_file(tenant, index_name, f'{partition}.index', root=self.__idx_dir)
+            index_path = get_relative_file(tenant, index_name, f'{partition}.index', root=self.idx_dir)
             faiss.write_index(_index, index_path)
 
             if partition == self.DEFAULT and tenant in self.mv_indices and index_name in self.mv_indices[tenant] and \
                     self.mv_indices[tenant][index_name] is not None:
-                with open(get_relative_file(tenant, index_name, 'mv_index.pkl', root=self.__idx_dir), 'wb') as f:
+                with open(get_relative_file(tenant, index_name, 'mv_index.pkl', root=self.idx_dir), 'wb') as f:
                     pickle.dump(self.mv_indices[tenant][index_name], f)
 
         return 1
@@ -197,7 +240,7 @@ class Faiss:
 
     def load_one(self, tenant: str, index_name: str, partition: str = '', log_id=None) -> int:
         if not partition:
-            index_dir = os.path.join(self.__idx_dir, tenant, index_name)
+            index_dir = os.path.join(self.idx_dir, tenant, index_name)
             if (not os.path.isdir(index_dir) or not os.listdir(index_dir)) and \
                     (tenant not in self.indices or index_name not in self.indices[tenant]):
                 return 0
@@ -229,7 +272,7 @@ class Faiss:
                     self.mv_indices[tenant][index_name] = pickle.load(f)
 
         else:
-            index_path = os.path.join(self.__idx_dir, tenant, index_name, f'{partition}.index')
+            index_path = os.path.join(self.idx_dir, tenant, index_name, f'{partition}.index')
             if not os.path.exists(index_path) and (
                     tenant not in self.indices or index_name not in self.indices[tenant] or
                     partition not in self.indices[tenant][index_name]):
@@ -249,7 +292,7 @@ class Faiss:
 
     def load(self, tenant: str, log_id=None):
         """ 从文件中加载索引 """
-        _tenant_dir = os.path.join(self.__idx_dir, tenant)
+        _tenant_dir = os.path.join(self.idx_dir, tenant)
         if not os.path.isdir(_tenant_dir):
             return
 
@@ -279,7 +322,7 @@ class Faiss:
             return True
 
         partition = partition if partition else self.DEFAULT
-        if os.path.exists(os.path.join(self.__idx_dir, tenant, index_name, f'{partition}.index')):
+        if os.path.exists(os.path.join(self.idx_dir, tenant, index_name, f'{partition}.index')):
             return True
         return False
 
@@ -326,26 +369,24 @@ class Faiss:
 
         return _combine_results(results, avg_results, d_table_id_2_info, top_k, log_id=log_id)
 
-    def delete_with_id(self, ids: List[int], tenant: str, index_name: str, partition: str = '', log_id=None):
-        da = self.get_da(tenant, index_name, partition)
-        if len(da) == 0:
+    def delete_with_id(self, mids: List[int], tenant: str, index_name: str, partition: str = '', log_id=None):
+        if not mids:
             return
 
-        if not ids:
+        df = self.get_df(tenant, index_name, partition)
+        if len(df) == 0:
             return
 
-        if isinstance(ids[0], int):
-            ids.sort(reverse=True)
-            len_da = len(da)
-            ids = list(filter(lambda x: x < len_da, ids))
+        del_indices = []
+        for mid in mids:
+            del_indices += list(df[df['mid'] == mid].index)
 
-            for _id in ids:
-                del da[_id]
+        del_indices = list(set(del_indices))
 
-        else:
-            ids = list(filter(lambda x: x in da, ids))
-            if ids:
-                del da[ids]
+        df = df.drop(del_indices)
+
+        df_path = self.get_df_path(tenant, index_name, partition)
+        df.to_csv(df_path, index=False)
 
     @logs.log
     def _search_a_index(self,
@@ -389,9 +430,16 @@ class Faiss:
 
         D, I = index.search(vectors, top_k)
 
+        ids = list(set(list(map(int, I.reshape(-1)))))
+        if -1 in ids:
+            ids.remove(-1)
+
+        if not ids:
+            return
+
         if table_name not in d_table_name_2_ids:
             d_table_name_2_ids[table_name] = []
-        d_table_name_2_ids[table_name] += list(set(list(map(int, I.reshape(-1)))))
+        d_table_name_2_ids[table_name] += ids
 
         for _i, _result_ids in enumerate(I):
             similarities = D[_i]
@@ -400,19 +448,22 @@ class Faiss:
                 for _id, _similarity in set(list(zip(_result_ids, similarities))) if _id != -1
             ]
 
-    def _get_info_thread(self, ids: list, table_name: str, d_table_id_2_info: dict):
+    def _get_info_thread(self,
+                         tenant: str,
+                         index_name: str,
+                         partition: str,
+                         table_name: str,
+                         ids: list,
+                         d_table_id_2_info: dict):
         if not ids:
             return
 
-        clean_table_name = table_name[:-9] if table_name.endswith('__default') else table_name
-        tenant, index_name, partition = clean_table_name.split('__')
-        da = self.get_da(tenant, index_name, partition)
+        min_i = min(ids)
+        max_i = max(ids)
 
-        texts = da[ids, 'text']
-        tags = da[ids, 'tags']
-
-        for _i, _id in enumerate(ids):
-            info = {'text': texts[_i], **tags[_i]}
+        df = self.get_df(tenant, index_name, partition, skip_rows=min_i, chunk_size=max_i - min_i + 1)
+        for _id in ids:
+            info = df.iloc[_id - min_i].to_dict()
             table_id = f"{table_name}__{_id}"
             d_table_id_2_info[table_id] = info
 
@@ -421,9 +472,42 @@ class Faiss:
         """ 获取具体的结构化信息 """
         d_table_id_2_info = {}
 
-        pool = []
+        q = []
+
         for table_name, ids in d_table_name_2_ids.items():
-            thread = threading.Thread(target=self._get_info_thread, args=(ids, table_name, d_table_id_2_info))
+            if not ids:
+                continue
+
+            clean_table_name = table_name[:-9] if table_name.endswith('__default') else table_name
+            tenant, index_name, partition = clean_table_name.split('__')
+
+            ids.sort()
+
+            g_ids = []
+            for _id in ids:
+                if not g_ids:
+                    g_ids.append([_id])
+                    continue
+
+                find_g = False
+                for g in g_ids:
+                    max_g = max(g + [_id])
+                    min_g = min(g + [_id])
+                    if max_g - min_g <= 1000:
+                        g.append(_id)
+                        find_g = True
+                        break
+
+                if not find_g:
+                    g_ids.append([_id])
+
+            for tmp_ids in g_ids:
+                q.append([tenant, index_name, partition, table_name, tmp_ids])
+
+        pool = []
+        for tenant, index_name, partition, table_name, ids in q:
+            thread = threading.Thread(target=self._get_info_thread, args=(
+                tenant, index_name, partition, table_name, ids, d_table_id_2_info))
             thread.start()
             pool.append(thread)
 

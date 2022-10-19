@@ -117,6 +117,8 @@ if __name__ == '__main__':
     #     info=[{'value': i} for i in range(1200, 1400)],
     # ))
 
+    iii = o_faiss.indices
+
     ret = index_search(SearchInput(
         index_names=['test', 'test'],
         vectors=list(map(lambda l: list(map(float, l)), a)),
