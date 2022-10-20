@@ -305,6 +305,20 @@ class Faiss:
 
         return 1
 
+    def load_batch(self, tenants: List[str], index_names: List[str], partitions: List[str], log_id=None):
+        pool = []
+        for i, _tenant in enumerate(tenants):
+            _thread = threading.Thread(target=self.load_one,
+                                       args=(_tenant, index_names[i], partitions[i]),
+                                       kwargs={'log_id': f'{log_id}({i})'})
+            _thread.start()
+            pool.append(_thread)
+
+        for _thread in pool:
+            _thread.join()
+
+        return 1
+
     def load(self, tenant: str, log_id=None):
         """ 从文件中加载索引 """
         _tenant_dir = os.path.join(self.idx_dir, tenant)
