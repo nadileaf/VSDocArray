@@ -4,6 +4,8 @@ import time
 import inspect
 import numpy as np
 from functools import wraps
+
+import pandas as pd
 from pydantic import BaseModel
 from vsDa.lib import utils
 from vsDa.config.path import LOG_DIR
@@ -71,25 +73,35 @@ def add(_id, function, message, pre_sep='', empty_line=0, _level=LEVEL_MSG, show
         f.write(string.encode('utf-8'))
 
 
-def _process_arg(arg):
+def _process_arg(arg, _iter=3):
+    if _iter <= 0:
+        return f'{arg}'
+
     if isinstance(arg, BaseModel):
         arg = arg.__dict__
 
+    if isinstance(arg, pd.DataFrame):
+        return len(arg)
+
     if isinstance(arg, dict):
         new_arg = {}
+        num = 0
         for k, v in arg.items():
             if k == 'vectors' and v is not None:
                 new_arg[k] = len(v)
             else:
-                new_arg[k] = _process_arg(v)
+                new_arg[k] = _process_arg(v, _iter - 1)
+            num += 1
+            if num >= 5:
+                break
         arg = new_arg
 
     elif isinstance(arg, list) or isinstance(arg, tuple):
-        return [_process_arg(v) for v in arg[:10]]
+        return [_process_arg(v, _iter - 1) for v in arg[:5]]
 
     elif isinstance(arg, np.ndarray):
         arg = list(arg)
-        return _process_arg(arg)
+        return [_process_arg(v, _iter - 1) for v in arg[:5]]
 
     return arg
 

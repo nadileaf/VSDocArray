@@ -21,6 +21,7 @@ class Faiss:
 
         # 记录索引
         self.indices = {}
+        self.df = {}
 
         # 记录 index 每个分区的滑动平均向量
         self.mv_indices = {}
@@ -34,8 +35,14 @@ class Faiss:
         file_name = f'{table_name}.csv'
         return os.path.join(self.data_dir, file_name)
 
-    def get_df(self, tenant: str, index_name: str, partition: str = '', skip_rows=None, names=None, chunk_size=None):
+    @logs.log
+    def get_df(self, tenant: str, index_name: str, partition: str = '',
+               skip_rows=None, names=None, chunk_size=None, log_id=None):
         file_path = self.get_df_path(tenant, index_name, partition)
+
+        if file_path in self.df and not skip_rows and not chunk_size:
+            return self.df
+
         if not os.path.exists(file_path):
             return pd.DataFrame()
 
@@ -45,10 +52,20 @@ class Faiss:
             names = list(tmp_df.columns)
 
         if chunk_size is None:
-            return pd.read_csv(file_path, skiprows=skip_rows, names=names)
+            df = pd.read_csv(file_path, skiprows=skip_rows, names=names)
+
+            if skip_rows is None:
+                self.df[file_path] = df
+            return df
+
         else:
             df_gen = pd.read_csv(file_path, skiprows=skip_rows, names=names, chunksize=chunk_size)
             return next(df_gen)
+
+    def release_df(self, tenant: str, index_name: str, partition: str = ''):
+        file_path = self.get_df_path(tenant, index_name, partition)
+        if file_path in self.df:
+            del self.df[file_path]
 
     def index(self, tenant: str, index_name: str, partition: str = '') -> Union[None, faiss.Index]:
         if tenant not in self.indices or index_name not in self.indices[tenant] or \
@@ -215,6 +232,7 @@ class Faiss:
 
         return _info
 
+    @logs.log
     def save_one(self, tenant: str, index_name: str, partition: str = '', log_id=None) -> int:
         _index = self.index(tenant, index_name, partition)
         if _index is None:
@@ -253,6 +271,7 @@ class Faiss:
         for index_name, index in self.indices[tenant].items():
             self.save_one(tenant, index_name, log_id=log_id)
 
+    @logs.log
     def load_one(self, tenant: str, index_name: str, partition: str = '', log_id=None) -> int:
         if not partition:
             index_dir = os.path.join(self.idx_dir, tenant, index_name)
@@ -305,6 +324,7 @@ class Faiss:
 
         return 1
 
+    @logs.log
     def load_batch(self, tenants: List[str], index_names: List[str], partitions: List[str], log_id=None):
         pool = []
         for i, _tenant in enumerate(tenants):
@@ -319,6 +339,7 @@ class Faiss:
 
         return 1
 
+    @logs.log
     def load(self, tenant: str, log_id=None):
         """ 从文件中加载索引 """
         _tenant_dir = os.path.join(self.idx_dir, tenant)
@@ -474,10 +495,11 @@ class Faiss:
         for _i, _result_ids in enumerate(I):
             similarities = D[_i]
             results[_i] += [
-                {'id': _id, 'score': _similarity, 'table_name': table_name}
+                {'id': _id, 'score': _similarity, 'table_name': table_name, 'index': index_name, 'partition': partition}
                 for _id, _similarity in set(list(zip(_result_ids, similarities))) if _id != -1
             ]
 
+    @logs.log
     def _get_info_thread(self,
                          tenant: str,
                          index_name: str,
@@ -485,7 +507,8 @@ class Faiss:
                          table_name: str,
                          ids: list,
                          d_table_id_2_info: dict,
-                         columns: List[str] = None):
+                         columns: List[str] = None,
+                         log_id=None):
         if not ids:
             return
 
@@ -500,6 +523,24 @@ class Faiss:
 
     @logs.log
     def _get_info(self, d_table_name_2_ids: dict, columns: List[str] = None, log_id=None) -> dict:
+        d_table_id_2_info = {}
+        for table_name, ids in d_table_name_2_ids.items():
+            if not ids:
+                continue
+
+            clean_table_name = table_name[:-9] if table_name.endswith('__default') else table_name
+            tenant, index_name, partition = clean_table_name.split('__')
+
+            df = self.get_df(tenant, index_name, partition, log_id=log_id)
+            for _id in ids:
+                info = df.iloc[int(_id)].to_dict()
+                table_id = f"{table_name}__{_id}"
+                d_table_id_2_info[table_id] = info
+
+        return d_table_id_2_info
+
+    @logs.log
+    def _get_info_multi_thread(self, d_table_name_2_ids: dict, columns: List[str] = None, log_id=None) -> dict:
         """ 获取具体的结构化信息 """
         d_table_id_2_info = {}
 
@@ -524,7 +565,7 @@ class Faiss:
                 for g in g_ids:
                     max_g = max(g + [_id])
                     min_g = min(g + [_id])
-                    if max_g - min_g <= 1000:
+                    if max_g - min_g <= 10000:
                         g.append(_id)
                         find_g = True
                         break
@@ -536,9 +577,13 @@ class Faiss:
                 q.append([tenant, index_name, partition, table_name, tmp_ids])
 
         pool = []
+        t_i = 0
         for tenant, index_name, partition, table_name, ids in q:
             thread = threading.Thread(target=self._get_info_thread, args=(
-                tenant, index_name, partition, table_name, ids, d_table_id_2_info, columns))
+                tenant, index_name, partition, table_name, ids, d_table_id_2_info, columns
+            ), kwargs={'log_id': f'{log_id}({t_i})'})
+            t_i += 1
+
             thread.start()
             pool.append(thread)
 
@@ -651,6 +696,8 @@ def _combine_results(results: List[list], avg_results: List[dict], d_table_id_2_
                 'data': data,
                 'score': combine_avg_score(avg_similarity, val['score']),
                 'mv_score': float(avg_similarity),
+                'index': val['index'],
+                'partition': val['partition'],
             })
 
         new_result.sort(key=lambda x: (-x['score'], -x['mv_score']))
