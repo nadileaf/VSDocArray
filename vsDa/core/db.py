@@ -41,7 +41,7 @@ class Faiss:
         file_path = self.get_df_path(tenant, index_name, partition)
 
         if file_path in self.df and not skip_rows and not chunk_size:
-            return self.df
+            return self.df[file_path]
 
         if not os.path.exists(file_path):
             return pd.DataFrame()
