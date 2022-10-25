@@ -400,6 +400,7 @@ class Faiss:
                top_k=20,
                each_top_k=20,
                use_mv=True,
+               threshold: float = None,
                log_id=None) -> List[List[dict]]:
         if vectors is None or not vectors.any():
             return []
@@ -413,7 +414,7 @@ class Faiss:
             tenant = tenants[i]
             partition = partitions[i] if partitions[i] else self.DEFAULT
             self._search_a_index(tenant, index_name, partition, vectors, nprobe, each_top_k,
-                                 avg_results, use_mv, d_table_name_2_ids, results, log_id=log_id)
+                                 avg_results, use_mv, d_table_name_2_ids, results, threshold, log_id=log_id)
 
         # 获取具体的结构化信息
         d_table_id_2_info = self._get_info(d_table_name_2_ids, columns, log_id=log_id)
@@ -451,6 +452,7 @@ class Faiss:
                         use_mv: bool,
                         d_table_name_2_ids: dict,
                         results: List[list],
+                        threshold: float = None,
                         log_id=None):
         # 获取 index
         index = self.index(tenant, index_name, partition)
@@ -481,6 +483,12 @@ class Faiss:
 
         D, I = index.search(vectors, top_k)
 
+        m_valid = I != -1
+        if threshold:
+            m_valid *= D > threshold
+            I[m_valid == False] = -1
+        D *= m_valid
+
         ids = list(set(list(map(int, I.reshape(-1)))))
         if -1 in ids:
             ids.remove(-1)
@@ -496,7 +504,7 @@ class Faiss:
             similarities = D[_i]
             results[_i] += [
                 {'id': _id, 'score': _similarity, 'table_name': table_name, 'index': index_name, 'partition': partition}
-                for _id, _similarity in set(list(zip(_result_ids, similarities))) if _id != -1
+                for _id, _similarity in zip(_result_ids, similarities) if _id != -1
             ]
 
     @logs.log
