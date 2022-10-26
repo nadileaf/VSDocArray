@@ -233,7 +233,7 @@ class Faiss:
         return _info
 
     @logs.log
-    def save_one(self, tenant: str, index_name: str, partition: str = '', log_id=None) -> int:
+    def save_one(self, tenant: str, index_name: str, partition: str = '', mv=False, log_id=None) -> int:
         _index = self.index(tenant, index_name, partition)
         if _index is None:
             return 0
@@ -255,8 +255,8 @@ class Faiss:
             index_path = get_relative_file(tenant, index_name, f'{partition}.index', root=self.idx_dir)
             faiss.write_index(_index, index_path)
 
-            if partition == self.DEFAULT and tenant in self.mv_indices and index_name in self.mv_indices[tenant] and \
-                    self.mv_indices[tenant][index_name] is not None:
+            if (partition == self.DEFAULT or mv) and tenant in self.mv_indices and \
+                    index_name in self.mv_indices[tenant] and self.mv_indices[tenant][index_name] is not None:
                 with open(get_relative_file(tenant, index_name, 'mv_index.pkl', root=self.idx_dir), 'wb') as f:
                     pickle.dump(self.mv_indices[tenant][index_name], f)
 
@@ -272,9 +272,11 @@ class Faiss:
             self.save_one(tenant, index_name, log_id=log_id)
 
     @logs.log
-    def load_one(self, tenant: str, index_name: str, partition: str = '', log_id=None) -> int:
+    def load_one(self, tenant: str, index_name: str, partition: str = '', mv=False, log_id=None) -> int:
+        index_dir = os.path.join(self.idx_dir, tenant, index_name)
+        mv_index_path = os.path.join(index_dir, 'mv_index.pkl')
+
         if not partition:
-            index_dir = os.path.join(self.idx_dir, tenant, index_name)
             if (not os.path.isdir(index_dir) or not os.listdir(index_dir)) and \
                     (tenant not in self.indices or index_name not in self.indices[tenant]):
                 return 0
@@ -299,14 +301,13 @@ class Faiss:
                 self.indices[tenant][index_name][partition] = faiss.read_index(index_path)
 
             # 若文件存在 且 没有被加载到内存
-            mv_index_path = os.path.join(index_dir, 'mv_index.pkl')
             if os.path.exists(mv_index_path) and (index_name not in self.mv_indices[tenant] or
                                                   self.mv_indices[tenant][index_name] is None):
                 with open(mv_index_path, 'rb') as f:
                     self.mv_indices[tenant][index_name] = pickle.load(f)
 
         else:
-            index_path = os.path.join(self.idx_dir, tenant, index_name, f'{partition}.index')
+            index_path = os.path.join(index_dir, f'{partition}.index')
             if not os.path.exists(index_path) and (
                     tenant not in self.indices or index_name not in self.indices[tenant] or
                     partition not in self.indices[tenant][index_name]):
@@ -321,6 +322,14 @@ class Faiss:
 
             if self.index(tenant, index_name, partition) is None:
                 self.indices[tenant][index_name][partition] = faiss.read_index(index_path)
+
+            # 若文件存在 且 没有被加载到内存
+            if mv and os.path.exists(mv_index_path):
+                if tenant not in self.mv_indices:
+                    self.mv_indices[tenant] = {}
+                if index_name not in self.mv_indices[tenant] or self.mv_indices[tenant][index_name] is None:
+                    with open(mv_index_path, 'rb') as f:
+                        self.mv_indices[tenant][index_name] = pickle.load(f)
 
         return 1
 
@@ -349,10 +358,10 @@ class Faiss:
         for index_name in os.listdir(_tenant_dir):
             self.load_one(tenant, index_name, log_id=log_id)
 
-    def release(self, tenant: str, index_name: str, partition: str = '', save=True, log_id=None) -> int:
+    def release(self, tenant: str, index_name: str, partition: str = '', save=True, mv=False, log_id=None) -> int:
         # release index 前，先保存索引
         if save:
-            ret = self.save_one(tenant, index_name, partition, log_id=log_id)
+            ret = self.save_one(tenant, index_name, partition, mv=mv, log_id=log_id)
             if not ret:
                 return 0
 
