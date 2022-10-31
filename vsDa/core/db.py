@@ -37,10 +37,10 @@ class Faiss:
 
     @logs.log
     def get_df(self, tenant: str, index_name: str, partition: str = '',
-               skip_rows=None, names=None, chunk_size=None, log_id=None):
+               skip_rows=None, names=None, chunk_size=None, refresh=False, log_id=None):
         file_path = self.get_df_path(tenant, index_name, partition)
 
-        if file_path in self.df and not skip_rows and not chunk_size:
+        if not refresh and file_path in self.df and not skip_rows and not chunk_size:
             return self.df[file_path]
 
         if not os.path.exists(file_path):
@@ -272,7 +272,7 @@ class Faiss:
             self.save_one(tenant, index_name, log_id=log_id)
 
     @logs.log
-    def load_one(self, tenant: str, index_name: str, partition: str = '', mv=False, log_id=None) -> int:
+    def load_one(self, tenant: str, index_name: str, partition: str = '', mv=False, refresh=False, log_id=None) -> int:
         index_dir = os.path.join(self.idx_dir, tenant, index_name)
         mv_index_path = os.path.join(index_dir, 'mv_index.pkl')
 
@@ -294,14 +294,14 @@ class Faiss:
 
                 # 若本身已在内存中，无需重复加载
                 partition = file_name[:-len('.index')]
-                if self.index(tenant, index_name, partition) is not None:
+                if not refresh and self.index(tenant, index_name, partition) is not None:
                     continue
 
                 index_path = os.path.join(index_dir, file_name)
                 self.indices[tenant][index_name][partition] = faiss.read_index(index_path)
 
             # 若文件存在 且 没有被加载到内存
-            if os.path.exists(mv_index_path) and (index_name not in self.mv_indices[tenant] or
+            if os.path.exists(mv_index_path) and (refresh or index_name not in self.mv_indices[tenant] or
                                                   self.mv_indices[tenant][index_name] is None):
                 with open(mv_index_path, 'rb') as f:
                     self.mv_indices[tenant][index_name] = pickle.load(f)
@@ -320,14 +320,14 @@ class Faiss:
             if index_name not in self.indices[tenant]:
                 self.indices[tenant][index_name] = {}
 
-            if self.index(tenant, index_name, partition) is None:
+            if refresh or self.index(tenant, index_name, partition) is None:
                 self.indices[tenant][index_name][partition] = faiss.read_index(index_path)
 
             # 若文件存在 且 没有被加载到内存
             if mv and os.path.exists(mv_index_path):
                 if tenant not in self.mv_indices:
                     self.mv_indices[tenant] = {}
-                if index_name not in self.mv_indices[tenant] or self.mv_indices[tenant][index_name] is None:
+                if refresh or index_name not in self.mv_indices[tenant] or self.mv_indices[tenant][index_name] is None:
                     with open(mv_index_path, 'rb') as f:
                         self.mv_indices[tenant][index_name] = pickle.load(f)
 
@@ -349,14 +349,14 @@ class Faiss:
         return 1
 
     @logs.log
-    def load(self, tenant: str, log_id=None):
+    def load(self, tenant: str, refresh=False, log_id=None):
         """ 从文件中加载索引 """
         _tenant_dir = os.path.join(self.idx_dir, tenant)
         if not os.path.isdir(_tenant_dir):
             return
 
         for index_name in os.listdir(_tenant_dir):
-            self.load_one(tenant, index_name, log_id=log_id)
+            self.load_one(tenant, index_name, refresh=refresh, log_id=log_id)
 
     def release(self, tenant: str, index_name: str, partition: str = '', save=True, mv=False, log_id=None) -> int:
         # release index 前，先保存索引
