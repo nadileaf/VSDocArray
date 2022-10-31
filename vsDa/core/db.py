@@ -334,12 +334,12 @@ class Faiss:
         return 1
 
     @logs.log
-    def load_batch(self, tenants: List[str], index_names: List[str], partitions: List[str], log_id=None):
+    def load_batch(self, tenants: List[str], index_names: List[str], partitions: List[str], refresh=False, log_id=None):
         pool = []
         for i, _tenant in enumerate(tenants):
             _thread = threading.Thread(target=self.load_one,
                                        args=(_tenant, index_names[i], partitions[i]),
-                                       kwargs={'log_id': f'{log_id}({i})'})
+                                       kwargs={'refresh': refresh, 'log_id': f'{log_id}({i})'})
             _thread.start()
             pool.append(_thread)
 

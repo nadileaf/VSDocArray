@@ -15,11 +15,13 @@ def index_load(
         index_name: str = Query('', description='索引的名称; 若为 * , 则加载索引索引'),
         partition: Optional[str] = Query('', description='索引的分区'),
         tenant: Optional[str] = Query('_test', description='租户名称'),
+        refresh: Optional[str] = Query(False, description='是否刷新已在内存中的索引'),
         log_id: Union[int, str] = None,
 ):
     tenant = tenant if isinstance(tenant, str) else tenant.default
     index_name = index_name if isinstance(index_name, str) else index_name.default
     partition = partition if isinstance(partition, str) else partition.default
+    refresh = refresh if isinstance(refresh, bool) else refresh.default
 
     tenant = check_tenant(tenant)
 
@@ -31,7 +33,7 @@ def index_load(
         o_faiss.load(tenant, log_id=log_id)
 
     else:
-        _ret = o_faiss.load_one(tenant, index_name, partition, log_id=log_id)
+        _ret = o_faiss.load_one(tenant, index_name, partition, refresh=refresh, log_id=log_id)
 
     msg = 'Successfully' if _ret else 'Fail'
     msg = f'{msg} loading index "{index_name}({partition})" (tenant: "{tenant}")'
